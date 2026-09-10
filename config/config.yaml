@@ -1,0 +1,23 @@
+model_path: "detector/yolov8n.pt"
+video_path: "archive/fourway.avi"
+tracker_config: "bytetrack.yaml"  # 指向ByteTrack的配置文件
+device: "cuda"                     # 或 "cuda"
+conf_threshold: 0.25              # 检测置信度阈值
+iou_threshold: 0.45               # NMS的IoU阈值
+save_video: true                  # 是否保存结果视频
+output_dir: "runs/track"          # 结果输出目录
+
+# 1. 绊线位置（相对画面宽高的比例，方便适配不同分辨率）
+line_position: 0.5        # 绊线在画面高度上的位置（0.5 = 正中间）
+line_margin: 0.05         # 绊线左右两端距离画面边缘的比例
+
+# 2. 显示相关
+display_width: 1000       # GUI 视频显示区域的宽度
+display_height: 600       # GUI 视频显示区域的高度
+
+# 3. 摄像头参数（如果 video_path 是摄像头编号时生效）
+camera_width: 1280        # 摄像头采集分辨率宽度
+camera_height: 720        # 摄像头采集分辨率高度
+
+# 4. 计数相关
+min_track_frames: 2       # 轨迹至少有几帧才参与绊线判断（防止误计数）
