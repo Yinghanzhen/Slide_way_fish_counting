@@ -5,6 +5,7 @@ import time
 from collections import defaultdict
 from tkinter import Tk, Button, Label, Frame, messagebox
 import cv2
+import numpy as np
 from PIL import Image, ImageTk
 from ultralytics import YOLO
 
@@ -18,19 +19,30 @@ class FishCounterApp:
         self.root.configure(bg="#f0f0f0")
 
         # 状态变量
-        self.running = False          # 算法是否在运行
-        self.paused = False           # 是否暂停
-        self.cap = None               # 视频捕获对象
-        self.model = None             # YOLO 模型
-        self.current_frame = None     # 当前帧图像（OpenCV 格式）
-        self.fish_count = 0           # 鱼苗计数
-        self.counted_ids = set()      # 已计数的 ID
-        self.history = defaultdict(list)  # 轨迹历史
+        self.running = False
+        self.paused = False
+        self.cap = None
+        self.current_frame = None
+        self.fish_count = 0
+        self.counted_ids = set()
+        self.history = defaultdict(list)
         self.frame_id = 0
 
-        # 虚拟绊线（相对坐标，会在每帧根据画面尺寸更新）
+        # 虚拟绊线
         self.line_start = (0, 0)
         self.line_end = (0, 0)
+
+        # ========== 提前加载并预热模型 ==========
+        self.model = YOLO(self.config['model_path'])
+        dummy = np.zeros((640, 640, 3), dtype=np.uint8)
+        self.model.track(
+            source=dummy,
+            tracker=self.config['tracker_config'],
+            device=self.config['device'],
+            persist=True,
+            verbose=False
+        )
+        print("模型加载完成，程序已就绪！")
 
         # 构建界面
         self._build_ui()
@@ -100,7 +112,6 @@ class FishCounterApp:
         self.pause_btn.config(state="normal", text="暂停")
         self.stop_btn.config(state="normal")
 
-        # 在后台线程中初始化模型并开始处理
         threading.Thread(target=self._run_pipeline, daemon=True).start()
 
     def toggle_pause(self):
@@ -129,24 +140,25 @@ class FishCounterApp:
             self.history.clear()
             self.count_label.config(text="当前计数: 0 条")
 
-    # ==================== 核心处理流程 ====================
+    # 核心处理流程
     def _run_pipeline(self):
         """在后台线程中运行检测与追踪"""
-        # 1. 加载模型
-        if self.model is None:
-            self.model = YOLO(self.config['model_path'])
-
-        # 2. 打开视频源（支持摄像头编号或视频文件路径）
+        # 打开视频源（模型已在 __init__ 中加载并预热）
         source = self.config['video_path']
         if isinstance(source, str) and source.isdigit():
-            source = int(source)  # 摄像头编号
+            source = int(source)
+
         self.cap = cv2.VideoCapture(source)
         if not self.cap.isOpened():
             messagebox.showerror("错误", f"无法打开视频源: {source}")
             self.stop()
             return
 
-        # 3. 逐帧处理
+        # 设置摄像头分辨率（仅对摄像头编号生效）
+        if isinstance(source, int):
+            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.config['camera_width'])
+            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.config['camera_height'])
+
         while self.running and self.cap.isOpened():
             if self.paused:
                 time.sleep(0.05)
@@ -159,17 +171,13 @@ class FishCounterApp:
             self.frame_id += 1
             h, w = frame.shape[:2]
 
-            # 更新绊线位置（画面中部，左右各留 5% 边距）
-            self.line_start = (int(w * self.config['line_margin']), int(h * self.config['line_position']))
-            self.line_end = (int(w * (1 - self.config['line_margin'])), int(h * self.config['line_position']))
+            # 更新绊线位置
+            self.line_start = (int(w * self.config['line_margin']),
+                               int(h * self.config['line_position']))
+            self.line_end = (int(w * (1 - self.config['line_margin'])),
+                             int(h * self.config['line_position']))
 
-            if isinstance(source, int):
-                self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.config['camera_width'])
-                self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.config['camera_height'])
-
-            self.video_frame.config(width=self.config['display_width'], height=self.config['display_height'])
-
-            # 4. 用 YOLO + ByteTrack 进行追踪
+            # YOLO + ByteTrack 追踪
             results = self.model.track(
                 source=frame,
                 tracker=self.config['tracker_config'],
@@ -180,7 +188,7 @@ class FishCounterApp:
                 verbose=False
             )
 
-            # 5. 处理追踪结果
+            # 处理追踪结果
             if results and results[0].boxes is not None and results[0].boxes.id is not None:
                 ids = results[0].boxes.id.cpu().numpy().astype(int)
                 boxes = results[0].boxes.xyxy.cpu().numpy()
@@ -191,15 +199,12 @@ class FishCounterApp:
                     center_y = (y1 + y2) / 2
                     current_pos = (center_x, center_y)
 
-                    # 绘制中心点
                     cv2.circle(frame, (int(center_x), int(center_y)), 3, (0, 255, 0), -1)
 
-                    # 保存轨迹历史
                     self.history[track_id].append(current_pos)
                     if len(self.history[track_id]) > 2:
                         self.history[track_id].pop(0)
 
-                    # 判断是否穿过绊线
                     if track_id not in self.counted_ids and len(self.history[track_id]) == 2:
                         prev_pos = self.history[track_id][0]
                         curr_pos = self.history[track_id][1]
@@ -207,16 +212,15 @@ class FishCounterApp:
                             self.fish_count += 1
                             self.counted_ids.add(track_id)
 
-            # 6. 在画面上绘制绊线和计数
+            # 绘制绊线和计数
             cv2.line(frame, self.line_start, self.line_end, (0, 0, 255), 2)
             cv2.putText(frame, f"Count: {self.fish_count}", (50, 50),
                         cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
 
-            # 7. 更新界面显示
+            # 更新界面
             self.current_frame = frame
             self.root.after(0, self._update_ui)
 
-        # 循环结束
         self.stop()
 
     def _update_ui(self):
@@ -247,24 +251,22 @@ class FishCounterApp:
         d3 = cross(x3, y3, x4, y4, x1, y1)
         d4 = cross(x3, y3, x4, y4, x2, y2)
 
-        return ((d1 > 0 and d2 < 0) or (d1 < 0 and d2 > 0)) and \
-               ((d3 > 0 and d4 < 0) or (d3 < 0 and d4 > 0))
+        return ((d1 > 0 and d2 < 0) or (d1 < 0 and d2 > 0)) and ((d3 > 0 and d4 < 0) or (d3 < 0 and d4 > 0))
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description="鱼苗计数系统")
-    parser.add_argument("--config", type=str, default="config/config.yaml", help="配置文件路径")
+    parser.add_argument("--config", type=str, default="config/config.yaml",
+                        help="配置文件路径")
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
 
-    # 加载配置
     with open(args.config, 'r', encoding='utf-8') as f:
         config = yaml.safe_load(f)
 
-    # 启动 GUI
     root = Tk()
     app = FishCounterApp(root, config)
     root.mainloop()
